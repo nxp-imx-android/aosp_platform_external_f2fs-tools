@@ -233,6 +233,10 @@ void print_inode_info(struct f2fs_sb_info *sbi,
 			DISP_u32(inode, i_projid);
 		if (c.feature & cpu_to_le32(F2FS_FEATURE_INODE_CHKSUM))
 			DISP_u32(inode, i_inode_checksum);
+		if (c.feature & cpu_to_le32(F2FS_FEATURE_INODE_CRTIME)) {
+			DISP_u64(inode, i_crtime);
+			DISP_u32(inode, i_crtime_nsec);
+		}
 	}
 
 	DISP_u32(inode, i_addr[ofs]);		/* Pointers to data blocks */
@@ -401,6 +405,16 @@ void print_ckpt_info(struct f2fs_sb_info *sbi)
 void print_cp_state(u32 flag)
 {
 	MSG(0, "Info: checkpoint state = %x : ", flag);
+	if (flag & CP_NOCRC_RECOVERY_FLAG)
+		MSG(0, "%s", " allow_nocrc");
+	if (flag & CP_TRIMMED_FLAG)
+		MSG(0, "%s", " trimmed");
+	if (flag & CP_NAT_BITS_FLAG)
+		MSG(0, "%s", " nat_bits");
+	if (flag & CP_CRC_RECOVERY_FLAG)
+		MSG(0, "%s", " crc");
+	if (flag & CP_FASTBOOT_FLAG)
+		MSG(0, "%s", " fastboot");
 	if (flag & CP_FSCK_FLAG)
 		MSG(0, "%s", " fsck");
 	if (flag & CP_ERROR_FLAG)
@@ -409,12 +423,6 @@ void print_cp_state(u32 flag)
 		MSG(0, "%s", " compacted_summary");
 	if (flag & CP_ORPHAN_PRESENT_FLAG)
 		MSG(0, "%s", " orphan_inodes");
-	if (flag & CP_FASTBOOT_FLAG)
-		MSG(0, "%s", " fastboot");
-	if (flag & CP_NAT_BITS_FLAG)
-		MSG(0, "%s", " nat_bits");
-	if (flag & CP_TRIMMED_FLAG)
-		MSG(0, "%s", " trimmed");
 	if (flag & CP_UMOUNT_FLAG)
 		MSG(0, "%s", " unmount");
 	else
@@ -430,6 +438,9 @@ void print_sb_state(struct f2fs_super_block *sb)
 	MSG(0, "Info: superblock features = %x : ", f);
 	if (f & cpu_to_le32(F2FS_FEATURE_ENCRYPT)) {
 		MSG(0, "%s", " encrypt");
+	}
+	if (f & cpu_to_le32(F2FS_FEATURE_VERITY)) {
+		MSG(0, "%s", " verity");
 	}
 	if (f & cpu_to_le32(F2FS_FEATURE_BLKZONED)) {
 		MSG(0, "%s", " blkzoned");
@@ -448,6 +459,9 @@ void print_sb_state(struct f2fs_super_block *sb)
 	}
 	if (f & cpu_to_le32(F2FS_FEATURE_QUOTA_INO)) {
 		MSG(0, "%s", " quota_ino");
+	}
+	if (f & cpu_to_le32(F2FS_FEATURE_INODE_CRTIME)) {
+		MSG(0, "%s", " inode_crtime");
 	}
 	MSG(0, "\n");
 	MSG(0, "Info: superblock encrypt level = %d, salt = ",
@@ -611,7 +625,7 @@ int validate_super_block(struct f2fs_sb_info *sbi, int block)
 			dev_read_version(c.version, 0, VERSION_LEN);
 			get_kernel_version(c.version);
 		} else {
-			memset(c.version, 0, VERSION_LEN);
+			get_kernel_uname_version(c.version);
 		}
 
 		/* build sb version */
@@ -890,7 +904,7 @@ static int f2fs_init_nid_bitmap(struct f2fs_sb_info *sbi)
 	struct curseg_info *curseg = CURSEG_I(sbi, CURSEG_HOT_DATA);
 	struct f2fs_summary_block *sum = curseg->sum_blk;
 	struct f2fs_journal *journal = &sum->journal;
-	struct f2fs_nat_block nat_block;
+	struct f2fs_nat_block *nat_block;
 	block_t start_blk;
 	nid_t nid;
 	int i;
@@ -905,18 +919,22 @@ static int f2fs_init_nid_bitmap(struct f2fs_sb_info *sbi)
 	/* arbitrarily set 0 bit */
 	f2fs_set_bit(0, nm_i->nid_bitmap);
 
-	memset((void *)&nat_block, 0, sizeof(struct f2fs_nat_block));
+	nat_block = malloc(F2FS_BLKSIZE);
+	if (!nat_block) {
+		free(nm_i->nid_bitmap);
+		return -ENOMEM;
+	}
 
 	for (nid = 0; nid < nm_i->max_nid; nid++) {
 		if (!(nid % NAT_ENTRY_PER_BLOCK)) {
 			int ret;
 
 			start_blk = current_nat_addr(sbi, nid);
-			ret = dev_read_block((void *)&nat_block, start_blk);
+			ret = dev_read_block(nat_block, start_blk);
 			ASSERT(ret >= 0);
 		}
 
-		if (nat_block.entries[nid % NAT_ENTRY_PER_BLOCK].block_addr)
+		if (nat_block->entries[nid % NAT_ENTRY_PER_BLOCK].block_addr)
 			f2fs_set_bit(nid, nm_i->nid_bitmap);
 	}
 
@@ -928,6 +946,7 @@ static int f2fs_init_nid_bitmap(struct f2fs_sb_info *sbi)
 		if (addr != NULL_ADDR)
 			f2fs_set_bit(nid, nm_i->nid_bitmap);
 	}
+	free(nat_block);
 	return 0;
 }
 
@@ -984,7 +1003,12 @@ void write_nat_bits(struct f2fs_sb_info *sbi,
 				(seg_off << get_sb(log_blocks_per_seg) << 1) +
 				(i & ((1 << get_sb(log_blocks_per_seg)) - 1)));
 
-		if (f2fs_test_bit(i, nm_i->nat_bitmap))
+		/*
+		 * Should consider new nat_blocks is larger than old
+		 * nm_i->nat_blocks, since nm_i->nat_bitmap is based on
+		 * old one.
+		 */
+		if (i < nm_i->nat_blocks && f2fs_test_bit(i, nm_i->nat_bitmap))
 			blkaddr += (1 << get_sb(log_blocks_per_seg));
 
 		ret = dev_read_block(nat_block, blkaddr);
@@ -1023,14 +1047,14 @@ int init_node_manager(struct f2fs_sb_info *sbi)
 	struct f2fs_checkpoint *cp = F2FS_CKPT(sbi);
 	struct f2fs_nm_info *nm_i = NM_I(sbi);
 	unsigned char *version_bitmap;
-	unsigned int nat_segs, nat_blocks;
+	unsigned int nat_segs;
 
 	nm_i->nat_blkaddr = get_sb(nat_blkaddr);
 
 	/* segment_count_nat includes pair segment so divide to 2. */
 	nat_segs = get_sb(segment_count_nat) >> 1;
-	nat_blocks = nat_segs << get_sb(log_blocks_per_seg);
-	nm_i->max_nid = NAT_ENTRY_PER_BLOCK * nat_blocks;
+	nm_i->nat_blocks = nat_segs << get_sb(log_blocks_per_seg);
+	nm_i->max_nid = NAT_ENTRY_PER_BLOCK * nm_i->nat_blocks;
 	nm_i->fcnt = 0;
 	nm_i->nat_cnt = 0;
 	nm_i->init_scan_nid = get_cp(next_free_nid);
@@ -1086,10 +1110,7 @@ int build_sit_info(struct f2fs_sb_info *sbi)
 	for (start = 0; start < TOTAL_SEGS(sbi); start++) {
 		sit_i->sentries[start].cur_valid_map
 			= calloc(SIT_VBLOCK_MAP_SIZE, 1);
-		sit_i->sentries[start].ckpt_valid_map
-			= calloc(SIT_VBLOCK_MAP_SIZE, 1);
-		if (!sit_i->sentries[start].cur_valid_map
-				|| !sit_i->sentries[start].ckpt_valid_map)
+		if (!sit_i->sentries[start].cur_valid_map)
 			return -ENOMEM;
 	}
 
@@ -1396,9 +1417,7 @@ void seg_info_from_raw_sit(struct seg_entry *se,
 		struct f2fs_sit_entry *raw_sit)
 {
 	se->valid_blocks = GET_SIT_VBLOCKS(raw_sit);
-	se->ckpt_valid_blocks = GET_SIT_VBLOCKS(raw_sit);
 	memcpy(se->cur_valid_map, raw_sit->valid_map, SIT_VBLOCK_MAP_SIZE);
-	memcpy(se->ckpt_valid_map, raw_sit->valid_map, SIT_VBLOCK_MAP_SIZE);
 	se->type = GET_SIT_TYPE(raw_sit);
 	se->orig_type = GET_SIT_TYPE(raw_sit);
 	se->mtime = le64_to_cpu(raw_sit->mtime);
@@ -1592,8 +1611,14 @@ void update_nat_blkaddr(struct f2fs_sb_info *sbi, nid_t ino,
 void get_node_info(struct f2fs_sb_info *sbi, nid_t nid, struct node_info *ni)
 {
 	struct f2fs_nat_entry raw_nat;
-	get_nat_entry(sbi, nid, &raw_nat);
+
 	ni->nid = nid;
+	if (c.func == FSCK) {
+		node_info_from_raw_nat(ni, &(F2FS_FSCK(sbi)->entries[nid]));
+		return;
+	}
+
+	get_nat_entry(sbi, nid, &raw_nat);
 	node_info_from_raw_nat(ni, &raw_nat);
 }
 
@@ -1869,7 +1894,7 @@ int find_next_free_block(struct f2fs_sb_info *sbi, u64 *to, int left, int type)
 	struct f2fs_super_block *sb = F2FS_RAW_SUPER(sbi);
 	struct seg_entry *se;
 	u32 segno;
-	u64 offset;
+	u32 offset;
 	int not_enough = 0;
 	u64 end_blkaddr = (get_sb(segment_count_main) <<
 			get_sb(log_blocks_per_seg)) + get_sb(main_blkaddr);
@@ -2358,7 +2383,7 @@ int f2fs_do_mount(struct f2fs_sb_info *sbi)
 	}
 
 	/* Check nat_bits */
-	if (is_set_ckpt_flags(cp, CP_NAT_BITS_FLAG)) {
+	if (c.func != DUMP && is_set_ckpt_flags(cp, CP_NAT_BITS_FLAG)) {
 		u_int32_t nat_bits_bytes, nat_bits_blocks;
 		__le64 *kaddr;
 		u_int32_t blk;
@@ -2398,10 +2423,9 @@ void f2fs_do_umount(struct f2fs_sb_info *sbi)
 	free(sbi->nm_info);
 
 	/* free sit_info */
-	for (i = 0; i < TOTAL_SEGS(sbi); i++) {
+	for (i = 0; i < TOTAL_SEGS(sbi); i++)
 		free(sit_i->sentries[i].cur_valid_map);
-		free(sit_i->sentries[i].ckpt_valid_map);
-	}
+
 	free(sit_i->sit_bitmap);
 	free(sm_i->sit_info);
 

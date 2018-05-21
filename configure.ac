@@ -102,6 +102,7 @@ AC_CHECK_HEADERS(m4_flatten([
 	sys/syscall.h
 	sys/mount.h
 	sys/sysmacros.h
+	sys/utsname.h
 	sys/xattr.h
 	unistd.h
 ]))
@@ -196,15 +197,16 @@ AC_CONFIG_FILES([
 	mkfs/Makefile
 	fsck/Makefile
 	tools/Makefile
+	tools/sg_write_buffer/Makefile
 ])
 
 # export library version info for mkfs/libf2fs_format_la
-AC_SUBST(FMT_CURRENT, 2)
+AC_SUBST(FMT_CURRENT, 3)
 AC_SUBST(FMT_REVISION, 0)
 AC_SUBST(FMT_AGE, 0)
 
 # export library version info for lib/libf2fs_la
-AC_SUBST(LIBF2FS_CURRENT, 3)
+AC_SUBST(LIBF2FS_CURRENT, 4)
 AC_SUBST(LIBF2FS_REVISION, 0)
 AC_SUBST(LIBF2FS_AGE, 0)
 
