@@ -36,7 +36,6 @@ struct f2fs_configuration c;
 struct sparse_file *f2fs_sparse_file;
 static char **blocks;
 u_int64_t blocks_count;
-static char *zeroed_block;
 #endif
 
 static int __get_device_fd(__u64 *offset)
@@ -104,8 +103,6 @@ static int sparse_write_blk(__u64 block, int count, const void *buf)
 
 	for (i = 0; i < count; ++i) {
 		cur_block = block + i;
-		if (blocks[cur_block] == zeroed_block)
-			blocks[cur_block] = NULL;
 		if (!blocks[cur_block]) {
 			blocks[cur_block] = calloc(1, F2FS_BLKSIZE);
 			if (!blocks[cur_block])
@@ -113,20 +110,6 @@ static int sparse_write_blk(__u64 block, int count, const void *buf)
 		}
 		memcpy(blocks[cur_block], in + (i * F2FS_BLKSIZE),
 				F2FS_BLKSIZE);
-	}
-	return 0;
-}
-
-static int sparse_write_zeroed_blk(__u64 block, int count)
-{
-	int i;
-	__u64 cur_block;
-
-	for (i = 0; i < count; ++i) {
-		cur_block = block + i;
-		if (blocks[cur_block])
-			continue;
-		blocks[cur_block] = zeroed_block;
 	}
 	return 0;
 }
@@ -146,16 +129,10 @@ static int sparse_import_segment(void *UNUSED(priv), const void *data, int len,
 	return sparse_write_blk(block, nr_blocks, data);
 }
 
-static int sparse_merge_blocks(uint64_t start, uint64_t num, int zero)
+static int sparse_merge_blocks(uint64_t start, uint64_t num)
 {
 	char *buf;
 	uint64_t i;
-
-	if (zero) {
-		blocks[start] = NULL;
-		return sparse_file_add_fill(f2fs_sparse_file, 0x0,
-					F2FS_BLKSIZE * num, start);
-	}
 
 	buf = calloc(num, F2FS_BLKSIZE);
 	if (!buf) {
@@ -179,7 +156,6 @@ static int sparse_merge_blocks(uint64_t start, uint64_t num, int zero)
 #else
 static int sparse_read_blk(__u64 block, int count, void *buf) { return 0; }
 static int sparse_write_blk(__u64 block, int count, const void *buf) { return 0; }
-static int sparse_write_zeroed_blk(__u64 block, int count) { return 0; }
 #endif
 
 int dev_read(void *buf, __u64 offset, size_t len)
@@ -259,8 +235,7 @@ int dev_fill(void *buf, __u64 offset, size_t len)
 	int fd;
 
 	if (c.sparse_mode)
-		return sparse_write_zeroed_blk(offset / F2FS_BLKSIZE,
-						len / F2FS_BLKSIZE);
+		return 0;
 
 	fd = __get_device_fd(&offset);
 	if (fd < 0)
@@ -332,12 +307,6 @@ int f2fs_init_sparse_file(void)
 		return -1;
 	}
 
-	zeroed_block = calloc(1, F2FS_BLKSIZE);
-	if (!zeroed_block) {
-		MSG(0, "\tError: Calloc Failed for zeroed block!!!\n");
-		return -1;
-	}
-
 	return sparse_file_foreach_chunk(f2fs_sparse_file, true, false,
 				sparse_import_segment, NULL);
 #else
@@ -346,8 +315,7 @@ int f2fs_init_sparse_file(void)
 #endif
 }
 
-#define MAX_CHUNK_SIZE		(1 * 1024 * 1024 * 1024ULL)
-#define MAX_CHUNK_COUNT		(MAX_CHUNK_SIZE / F2FS_BLKSIZE)
+#define MAX_CHUNK_SIZE (1 * 1024 * 1024 * 1024ULL)
 int f2fs_finalize_device(void)
 {
 	int i;
@@ -368,44 +336,24 @@ int f2fs_finalize_device(void)
 		}
 
 		for (j = 0; j < blocks_count; ++j) {
-			if (chunk_start != -1) {
-				if (j - chunk_start >= MAX_CHUNK_COUNT) {
-					ret = sparse_merge_blocks(chunk_start,
-							j - chunk_start, 0);
-					ASSERT(!ret);
-					chunk_start = -1;
-				}
-			}
-
-			if (chunk_start == -1) {
-				if (!blocks[j])
-					continue;
-
-				if (blocks[j] == zeroed_block) {
-					ret = sparse_merge_blocks(j, 1, 1);
-					ASSERT(!ret);
-				} else {
-					chunk_start = j;
-				}
-			} else {
-				if (blocks[j] && blocks[j] != zeroed_block)
-					continue;
-
+			if (!blocks[j] && chunk_start != -1) {
 				ret = sparse_merge_blocks(chunk_start,
-						j - chunk_start, 0);
-				ASSERT(!ret);
-
-				if (blocks[j] == zeroed_block) {
-					ret = sparse_merge_blocks(j, 1, 1);
-					ASSERT(!ret);
-				}
-
+							j - chunk_start);
+				chunk_start = -1;
+			} else if (blocks[j] && chunk_start == -1) {
+				chunk_start = j;
+			} else if (blocks[j] && (chunk_start != -1) &&
+				 (j + 1 - chunk_start >=
+					(MAX_CHUNK_SIZE / F2FS_BLKSIZE))) {
+				ret = sparse_merge_blocks(chunk_start,
+							  j + 1 - chunk_start);
 				chunk_start = -1;
 			}
+			ASSERT(!ret);
 		}
 		if (chunk_start != -1) {
 			ret = sparse_merge_blocks(chunk_start,
-						blocks_count - chunk_start, 0);
+						blocks_count - chunk_start);
 			ASSERT(!ret);
 		}
 
@@ -417,8 +365,6 @@ int f2fs_finalize_device(void)
 			free(blocks[j]);
 		free(blocks);
 		blocks = NULL;
-		free(zeroed_block);
-		zeroed_block = NULL;
 		f2fs_sparse_file = NULL;
 	}
 #endif

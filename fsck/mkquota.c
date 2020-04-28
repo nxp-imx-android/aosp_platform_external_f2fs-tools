@@ -42,11 +42,10 @@ static void print_dquot(const char *desc, struct dquot *dq)
 #define print_dquot(...)
 #endif
 
-static int write_dquots(dict_t *dict, struct quota_handle *qh)
+static void write_dquots(dict_t *dict, struct quota_handle *qh)
 {
 	dnode_t		*n;
 	struct dquot	*dq;
-	int retval = 0;
 
 	for (n = dict_first(dict); n; n = dict_next(dict, n)) {
 		dq = dnode_get(n);
@@ -54,13 +53,10 @@ static int write_dquots(dict_t *dict, struct quota_handle *qh)
 			print_dquot("write", dq);
 			dq->dq_h = qh;
 			update_grace_times(dq);
-			if (qh->qh_ops->commit_dquot(dq)) {
-				retval = -1;
+			if (qh->qh_ops->commit_dquot(dq))
 				break;
-			}
 		}
 	}
-	return retval;
 }
 
 errcode_t quota_write_inode(struct f2fs_sb_info *sbi, enum quota_type qtype)
@@ -87,7 +83,7 @@ errcode_t quota_write_inode(struct f2fs_sb_info *sbi, enum quota_type qtype)
 		if (retval) {
 			log_debug("Cannot initialize io on quotafile");
 		} else {
-			retval = write_dquots(dict, h);
+			write_dquots(dict, h);
 			quota_file_close(sbi, h, 1);
 		}
 	}
