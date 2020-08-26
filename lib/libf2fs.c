@@ -504,14 +504,16 @@ unsigned int addrs_per_inode(struct f2fs_inode *i)
 {
 	unsigned int addrs = CUR_ADDRS_PER_INODE(i) - get_inline_xattr_addrs(i);
 
-	if (!(le32_to_cpu(i->i_flags) & F2FS_COMPR_FL))
+	if (!LINUX_S_ISREG(le16_to_cpu(i->i_mode)) ||
+			!(le32_to_cpu(i->i_flags) & F2FS_COMPR_FL))
 		return addrs;
 	return ALIGN_DOWN(addrs, 1 << i->i_log_cluster_size);
 }
 
 unsigned int addrs_per_block(struct f2fs_inode *i)
 {
-	if (!(le32_to_cpu(i->i_flags) & F2FS_COMPR_FL))
+	if (!LINUX_S_ISREG(le16_to_cpu(i->i_mode)) ||
+			!(le32_to_cpu(i->i_flags) & F2FS_COMPR_FL))
 		return DEF_ADDRS_PER_BLOCK;
 	return ALIGN_DOWN(DEF_ADDRS_PER_BLOCK, 1 << i->i_log_cluster_size);
 }
@@ -1156,6 +1158,8 @@ int get_device_info(int i)
 	c.sectors_per_blk = F2FS_BLKSIZE / c.sector_size;
 	c.total_sectors += dev->total_sectors;
 
+	if (c.sparse_mode && f2fs_init_sparse_file())
+		return -1;
 	return 0;
 }
 #endif
@@ -1300,6 +1304,17 @@ int f2fs_str2encoding(const char *string)
 			return f2fs_encoding_map[i].encoding_magic;
 
 	return -EINVAL;
+}
+
+char *f2fs_encoding2str(const int encoding)
+{
+	int i;
+
+	for (i = 0 ; i < ARRAY_SIZE(f2fs_encoding_map); i++)
+		if (f2fs_encoding_map[i].encoding_magic == encoding)
+			return f2fs_encoding_map[i].name;
+
+	return NULL;
 }
 
 int f2fs_get_encoding_flags(int encoding)
