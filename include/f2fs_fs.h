@@ -41,6 +41,9 @@
 
 #include <inttypes.h>
 #ifdef HAVE_LINUX_TYPES_H
+#ifndef __SANE_USERSPACE_TYPES__
+#define __SANE_USERSPACE_TYPES__       /* For PPC64, to get LL64 types */
+#endif
 #include <linux/types.h>
 #endif
 #include <sys/types.h>
@@ -504,6 +507,7 @@ struct f2fs_configuration {
 	int large_nat_bitmap;
 	int fix_chksum;			/* fix old cp.chksum position */
 	__le32 feature;			/* defined features */
+	unsigned int quota_bits;	/* quota bits */
 	time_t fixed_time;
 
 	/* mkfs parameters */
